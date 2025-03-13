@@ -11,19 +11,24 @@ import ta
 @st.cache_data
 def fetch_stock_data(ticker, period, interval):
     try:
-        end_date = datetime.now()
-        if period == '1wk':
-            start_date = end_date - timedelta(days=7)
-            data = yf.download(ticker, start=start_date, end=end_date, interval=interval)
-        else:
-            data = yf.download(ticker, period=period, interval=interval)
+        # Try fetching data
+        data = yf.download(ticker, period=period, interval=interval)
+        
+        # If data is empty, try using a longer period
+        if data.empty and period != 'max':  
+            st.warning(f"Not enough data for period '{period}', trying 'max'.")
+            data = yf.download(ticker, period='max', interval=interval)
+        
         if data.empty:
             st.error(f"No data available for ticker '{ticker}' with period '{period}' and interval '{interval}'.")
             return pd.DataFrame()
+        
         return data
+
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
+
 
 # Process data to ensure it is timezone-aware and correctly formatted
 def process_data(data):
