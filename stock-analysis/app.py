@@ -190,8 +190,42 @@ if st.sidebar.button('Update'):
 
 # 2C: SIDEBAR REAL-TIME PRICES
 st.sidebar.header('Real-Time Stock Prices')
-stock_symbols = ['AAPL', 'GOOGL', 'AMZN', 'MSFT']
-for symbol in stock_symbols:
+stocks = [
+    "AAPL",  # Apple
+    "GOOGL", # Alphabet (Google)
+    "AMZN",  # Amazon
+    "MSFT",  # Microsoft
+    "TSLA",  # Tesla
+    "NVDA",  # NVIDIA
+    "META",  # Meta (Facebook)
+    "NFLX",  # Netflix
+    "IBM",   # IBM
+    "INTC",  # Intel
+    "AMD",   # AMD
+    "ORCL",  # Oracle
+    "PYPL",  # PayPal
+    "CSCO",  # Cisco
+    "ADBE",  # Adobe
+    "QCOM",  # Qualcomm
+    "BA",    # Boeing
+    "DIS",   # Disney
+    "WMT",   # Walmart
+    "PEP",   # PepsiCo
+    "KO",    # Coca-Cola
+    "V",     # Visa
+    "MA",    # Mastercard
+    "JPM",   # JPMorgan Chase
+    "GS",    # Goldman Sachs
+    "NFLX",  # Netflix
+    "UBER",  # Uber
+    "LYFT",  # Lyft
+    "SBUX",  # Starbucks
+    "PFE",   # Pfizer
+    "MRNA",  # Moderna
+    "UNH",   # UnitedHealth
+]
+
+for symbol in stocks:
     real_time_data = fetch_stock_data(symbol, '1d', '1m')
     if not real_time_data.empty:
         real_time_data = process_data(real_time_data)
