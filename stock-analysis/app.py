@@ -6,8 +6,8 @@ import requests
 import time
 from random import uniform
 
-# --- CONFIG ---
-ALPHA_VANTAGE_KEY = "6IMMQWX1FR2L482K"  # Replace with your own key
+ALPHA_VANTAGE_KEY = st.secrets["ALPHA_VANTAGE_KEY"]
+
 SYMBOLS = ['AAPL', 'GOOGL', 'AMZN', 'MSFT']
 MAX_RETRIES = 3
 BASE_DELAY = 1.5
@@ -27,12 +27,10 @@ def fetch_alpha_vantage_data(ticker, function, outputsize='compact'):
             response = requests.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-            # Check for API errors
-            if 'Error Message' in data or 'Note' in data:
-                return pd.DataFrame()
-            # Find time series key
+            # DEBUG: Show API response in Streamlit if data is empty
             time_keys = [k for k in data.keys() if 'Time Series' in k]
             if not time_keys:
+                st.warning(f"API response: {data}")
                 return pd.DataFrame()
             ts_data = data[time_keys[0]]
             df = pd.DataFrame.from_dict(ts_data, orient='index')
@@ -46,10 +44,11 @@ def fetch_alpha_vantage_data(ticker, function, outputsize='compact'):
             df.index = pd.to_datetime(df.index)
             df = df.astype(float).sort_index()
             return df
-        except Exception:
+        except Exception as e:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(BASE_DELAY * (2 ** attempt) + uniform(0, 0.5))
             else:
+                st.error(f"Failed to fetch data after {MAX_RETRIES} attempts: {str(e)}")
                 return pd.DataFrame()
 
 @st.cache_data(ttl=300)
