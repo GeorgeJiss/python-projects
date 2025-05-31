@@ -1,239 +1,180 @@
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-import yfinance as yf
-from datetime import datetime, timedelta
 import ta
+import requests
+import time
+from random import uniform
 
-## PART 1: Define Functions for Pulling, Processing, and Creating Indicators ##
+# --- CONFIG ---
+ALPHA_VANTAGE_KEY = "6IMMQWX1FR2L482K"  # Replace with your own key
+SYMBOLS = ['AAPL', 'GOOGL', 'AMZN', 'MSFT']
+MAX_RETRIES = 3
+BASE_DELAY = 1.5
 
-# Fetch stock data based on the ticker, period, and interval
-@st.cache_data
-def fetch_stock_data(ticker, period, interval):
-    try:
-        # Try fetching data
-        data = yf.download(ticker, period=period, interval=interval)
-        
-        # If data is empty, try using a longer period
-        if data.empty and period != 'max':  
-            st.warning(f"Not enough data for period '{period}', trying 'max'.")
-            data = yf.download(ticker, period='max', interval=interval)
-        
-        if data.empty:
-            st.error(f"No data available for ticker '{ticker}' with period '{period}' and interval '{interval}'.")
-            return pd.DataFrame()
-        
-        return data
+# --- Alpha Vantage fetch ---
+def fetch_alpha_vantage_data(ticker, function, outputsize='compact'):
+    url = "https://www.alphavantage.co/query"
+    params = {
+        'function': function,
+        'symbol': ticker,
+        'outputsize': outputsize,
+        'apikey': ALPHA_VANTAGE_KEY,
+        'datatype': 'json'
+    }
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            # Check for API errors
+            if 'Error Message' in data or 'Note' in data:
+                return pd.DataFrame()
+            # Find time series key
+            time_keys = [k for k in data.keys() if 'Time Series' in k]
+            if not time_keys:
+                return pd.DataFrame()
+            ts_data = data[time_keys[0]]
+            df = pd.DataFrame.from_dict(ts_data, orient='index')
+            df = df.rename(columns={
+                '1. open': 'Open',
+                '2. high': 'High',
+                '3. low': 'Low',
+                '4. close': 'Close',
+                '5. volume': 'Volume'
+            })
+            df.index = pd.to_datetime(df.index)
+            df = df.astype(float).sort_index()
+            return df
+        except Exception:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(BASE_DELAY * (2 ** attempt) + uniform(0, 0.5))
+            else:
+                return pd.DataFrame()
 
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return pd.DataFrame()
+@st.cache_data(ttl=300)
+def fetch_stock_data(ticker, period):
+    function_map = {
+        '1d': 'TIME_SERIES_DAILY',
+        '1wk': 'TIME_SERIES_WEEKLY',
+        '1mo': 'TIME_SERIES_MONTHLY',
+        '1y': 'TIME_SERIES_WEEKLY',
+        'max': 'TIME_SERIES_MONTHLY'
+    }
+    function = function_map.get(period, 'TIME_SERIES_DAILY')
+    return fetch_alpha_vantage_data(ticker, function)
 
-
-# Process data to ensure it is timezone-aware and correctly formatted
 def process_data(data):
-    if data.index.tzinfo is None:
-        data.index = data.index.tz_localize('UTC')
-    data.index = data.index.tz_convert('US/Eastern')
-    data.reset_index(inplace=True)
-    data.rename(columns={'Date': 'Datetime'}, inplace=True)
-    
-    # Flatten any multi-dimensional columns
-    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-        if data[col].ndim > 1:  # Check if column is multi-dimensional
-            data[col] = data[col].iloc[:, 0]  # Convert to 1D Series
-    
-    return data
+    if not data.empty:
+        df = data.copy()
+        df = df.reset_index().rename(columns={'index': 'Datetime'})
+        return df.dropna()
+    return pd.DataFrame()
 
-# Calculate basic metrics from the stock data
-def calculate_metrics(data):
-    # Convert Series values to native Python float types
-    last_close = float(data['Close'].iloc[-1])
-    prev_close = float(data['Close'].iloc[0])
-    change = last_close - prev_close
-    pct_change = (change / prev_close) * 100
-    high = float(data['High'].max())
-    low = float(data['Low'].min())
-    volume = int(data['Volume'].sum())
-    return last_close, change, pct_change, high, low, volume
+def calculate_metrics(df):
+    last_close = df['Close'].iloc[-1]
+    first_close = df['Close'].iloc[0]
+    change = last_close - first_close
+    pct_change = (change / first_close) * 100 if first_close != 0 else 0
+    high = df['High'].max()
+    low = df['Low'].min()
+    volume = df['Volume'].sum()
+    return {
+        'last_close': last_close,
+        'change': change,
+        'pct_change': pct_change,
+        'high': high,
+        'low': low,
+        'volume': volume
+    }
 
-# Add technical indicators (SMA and EMA)
-def add_technical_indicators(data):
-    # Ensure Close data is 1-dimensional and convert to pandas Series
-    if data['Close'].ndim > 1:
-        close_data = pd.Series(data['Close'].values.ravel(), index=data.index)
-    else:
-        close_data = data['Close']
-    
-    # Calculate indicators using the pandas Series
-    data['SMA_20'] = ta.trend.sma_indicator(close=close_data, window=20)
-    data['EMA_20'] = ta.trend.ema_indicator(close=close_data, window=20)
-    return data
+def add_technical_indicators(df):
+    df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
+    df['EMA_20'] = ta.trend.ema_indicator(df['Close'], window=20)
+    return df
 
-## PART 2: Creating the Dashboard App layout ##
+# --- Streamlit UI ---
+if 'main_ticker' not in st.session_state:
+    st.session_state.main_ticker = 'ADBE'
 
-# Set up Streamlit page layout
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_icon="📈")
 st.title('Real-Time Stock Dashboard')
 
-# 2A: SIDEBAR PARAMETERS
-st.sidebar.header('Chart Parameters')
-ticker = st.sidebar.text_input('Ticker', 'ADBE')
-time_period = st.sidebar.selectbox('Time Period', ['1d', '1wk', '1mo', '1y', 'max'])
-chart_type = st.sidebar.selectbox('Chart Type', ['Candlestick', 'Line'])
-indicators = st.sidebar.multiselect('Technical Indicators', ['SMA 20', 'EMA 20'])
+with st.sidebar:
+    st.header('Controls')
+    st.session_state.main_ticker = st.text_input('Ticker', st.session_state.main_ticker).upper()
+    time_period = st.selectbox('Time Period', ['1d', '1wk', '1mo', '1y', 'max'])
+    chart_type = st.selectbox('Chart Type', ['Candlestick', 'Line'])
+    indicators = st.multiselect('Technical Indicators', ['SMA 20', 'EMA 20'])
+    st.header('Index Prices')
+    for symbol in SYMBOLS:
+        data = fetch_stock_data(symbol, '1d')
+        df = process_data(data)
+        if not df.empty:
+            metrics = calculate_metrics(df)
+            st.metric(symbol, 
+                      f"{metrics['last_close']:.2f}", 
+                      f"{metrics['change']:.2f} ({metrics['pct_change']:.2f}%)")
 
-# Mapping of time periods to data intervals
-interval_mapping = {
-    '1d': '1m',
-    '1wk': '30m',
-    '1mo': '1d',
-    '1y': '1wk',
-    'max': '1wk'
-}
+if st.sidebar.button('Refresh Data'):
+    st.cache_data.clear()
 
-# 2B: MAIN CONTENT AREA
-if st.sidebar.button('Update'):
-    data = fetch_stock_data(ticker, time_period, interval_mapping[time_period])
-    if not data.empty:
-        data = process_data(data)
-        data = add_technical_indicators(data)
-
-        last_close, change, pct_change, high, low, volume = calculate_metrics(data)
-
-        # Display main metrics
-        st.metric(label=f"{ticker} Last Price", value=f"{last_close:.2f} USD", delta=f"{change:.2f} ({pct_change:.2f}%)")
-
+try:
+    main_data = fetch_stock_data(st.session_state.main_ticker, time_period)
+    main_df = process_data(main_data)
+    if not main_df.empty:
+        main_df = add_technical_indicators(main_df)
+        metrics = calculate_metrics(main_df)
         col1, col2, col3 = st.columns(3)
-        col1.metric("High", f"{high:.2f} USD")
-        col2.metric("Low", f"{low:.2f} USD")
-        col3.metric("Volume", f"{volume:,}")
-
-        try:
-            # Create figure with secondary y-axis
-            fig = go.Figure()
-            
-            if chart_type == 'Candlestick':
-                fig.add_trace(
-                    go.Candlestick(
-                        x=data['Datetime'],
-                        open=data['Open'],
-                        high=data['High'],
-                        low=data['Low'],
-                        close=data['Close'],
-                        name='OHLC'
-                    )
-                )
-            else:
-                fig.add_trace(
-                    go.Scatter(
-                        x=data['Datetime'],
-                        y=data['Close'],
-                        mode='lines',
-                        name='Close'
-                    )
-                )
-            
-            # Add selected technical indicators
-            for indicator in indicators:
-                if indicator == 'SMA 20':
-                    fig.add_trace(
-                        go.Scatter(
-                            x=data['Datetime'],
-                            y=data['SMA_20'],
-                            mode='lines',
-                            name='SMA 20',
-                            line=dict(color='orange')
-                        )
-                    )
-                elif indicator == 'EMA 20':
-                    fig.add_trace(
-                        go.Scatter(
-                            x=data['Datetime'],
-                            y=data['EMA_20'],
-                            mode='lines',
-                            name='EMA 20',
-                            line=dict(color='blue')
-                        )
-                    )
-            
-            # Update layout with better formatting
-            fig.update_layout(
-                title=f'{ticker} {time_period.upper()} Chart',
-                yaxis_title='Price (USD)',
-                xaxis_title='Date',
-                height=600,
-                template='plotly_white',
-                hovermode='x unified',
-                xaxis=dict(
-                    rangeslider=dict(visible=True),
-                    type='date'
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridcolor='lightgrey'
-                )
-            )
-            
-            # Display the chart
-            st.plotly_chart(fig, use_container_width=True)
-            
-        except Exception as e:
-            st.error(f"Error creating chart: {str(e)}")
-
-        # Display historical data and technical indicators
-        st.subheader('Historical Data')
-        st.dataframe(data[['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume']])
-
-        st.subheader('Technical Indicators')
-        st.dataframe(data[['Datetime', 'SMA_20', 'EMA_20']])
-
-# 2C: SIDEBAR REAL-TIME PRICES
-st.sidebar.header('Real-Time Stock Prices')
-stocks = [
-    "AAPL",  # Apple
-    "GOOGL", # Alphabet (Google)
-    "AMZN",  # Amazon
-    "MSFT",  # Microsoft
-    "TSLA",  # Tesla
-    "NVDA",  # NVIDIA
-    "META",  # Meta (Facebook)
-    "NFLX",  # Netflix
-    "IBM",   # IBM
-    "INTC",  # Intel
-    "AMD",   # AMD
-    "ORCL",  # Oracle
-    "PYPL",  # PayPal
-    "CSCO",  # Cisco
-    "ADBE",  # Adobe
-    "QCOM",  # Qualcomm
-    "BA",    # Boeing
-    "DIS",   # Disney
-    "WMT",   # Walmart
-    "PEP",   # PepsiCo
-    "KO",    # Coca-Cola
-    "V",     # Visa
-    "MA",    # Mastercard
-    "JPM",   # JPMorgan Chase
-    "GS",    # Goldman Sachs
-    "NFLX",  # Netflix
-    "UBER",  # Uber
-    "LYFT",  # Lyft
-    "SBUX",  # Starbucks
-    "PFE",   # Pfizer
-    "MRNA",  # Moderna
-    "UNH",   # UnitedHealth
-]
-
-for symbol in stocks:
-    real_time_data = fetch_stock_data(symbol, '1d', '1m')
-    if not real_time_data.empty:
-        real_time_data = process_data(real_time_data)
-        last_price = float(real_time_data['Close'].iloc[-1])
-        open_price = float(real_time_data['Open'].iloc[0])
-        change = last_price - open_price
-        pct_change = (change / open_price) * 100
-        st.sidebar.metric(f"{symbol}", f"{last_price:.2f} USD", f"{change:.2f} ({pct_change:.2f}%)")
-
-st.sidebar.subheader('About')
-st.sidebar.info('This dashboard provides stock data and technical indicators for various time periods. Use the sidebar to customize your view.')
+        col1.metric("Current Price", f"{metrics['last_close']:.2f}", 
+                  f"{metrics['change']:.2f} ({metrics['pct_change']:.2f}%)")
+        col2.metric("Session High", f"{metrics['high']:.2f}")
+        col3.metric("Session Low", f"{metrics['low']:.2f}")
+        fig = go.Figure()
+        if chart_type == 'Candlestick':
+            fig.add_trace(go.Candlestick(
+                x=main_df['Datetime'],
+                open=main_df['Open'],
+                high=main_df['High'],
+                low=main_df['Low'],
+                close=main_df['Close'],
+                name='OHLC'
+            ))
+        else:
+            fig.add_trace(go.Scatter(
+                x=main_df['Datetime'],
+                y=main_df['Close'],
+                mode='lines',
+                name='Price'
+            ))
+        for indicator in indicators:
+            if indicator == 'SMA 20':
+                fig.add_trace(go.Scatter(
+                    x=main_df['Datetime'],
+                    y=main_df['SMA_20'],
+                    line=dict(color='orange', width=1),
+                    name='SMA 20'
+                ))
+            elif indicator == 'EMA 20':
+                fig.add_trace(go.Scatter(
+                    x=main_df['Datetime'],
+                    y=main_df['EMA_20'],
+                    line=dict(color='blue', width=1),
+                    name='EMA 20'
+                ))
+        fig.update_layout(
+            height=600,
+            hovermode='x unified',
+            xaxis_rangeslider_visible=False,
+            template='plotly_dark',
+            margin=dict(r=20, t=40, b=20)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        with st.expander("Historical Data"):
+            st.dataframe(main_df[['Datetime', 'Open', 'High', 'Low', 'Close', 'Volume']])
+        with st.expander("Technical Indicators"):
+            st.dataframe(main_df[['Datetime', 'SMA_20', 'EMA_20']])
+    else:
+        st.warning("No data available for this ticker and time period.")
+except Exception as e:
+    st.error(f"Application error: {str(e)}")
