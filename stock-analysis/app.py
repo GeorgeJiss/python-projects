@@ -1,49 +1,57 @@
 import streamlit as st
-import plotly.graph_objects as go
+
+st.set_page_config(layout="wide", page_icon="📈")
+st.title('Real-Time Stock Dashboard')
+
+
 import pandas as pd
-import ta
+import plotly.graph_objects as go
 import requests
+import ta
 import time
 from random import uniform
 
-ALPHA_VANTAGE_KEY = st.secrets["ALPHA_VANTAGE_KEY"]
+try:
+    TWELVE_DATA_KEY = st.secrets["TWELVE_DATA_KEY"]
+except Exception:
+    TWELVE_DATA_KEY = "a8064b85699348b2aa3d94b08f3cd443"
 
-SYMBOLS = ['AAPL', 'GOOGL', 'AMZN', 'MSFT']
+SYMBOLS = ['AAPL', 'GOOGL', 'AMZN', 'MSFT', 'TSLA', 'NVDA']
 MAX_RETRIES = 3
 BASE_DELAY = 1.5
 
-# --- Alpha Vantage fetch ---
-def fetch_alpha_vantage_data(ticker, function, outputsize='compact'):
-    url = "https://www.alphavantage.co/query"
+# --- Twelve Data fetch ---
+def fetch_twelvedata_data(ticker, interval, outputsize=100):
+    url = "https://api.twelvedata.com/time_series"
     params = {
-        'function': function,
         'symbol': ticker,
+        'interval': interval,
         'outputsize': outputsize,
-        'apikey': ALPHA_VANTAGE_KEY,
-        'datatype': 'json'
+        'apikey': TWELVE_DATA_KEY,
+        'format': 'JSON'
     }
     for attempt in range(MAX_RETRIES):
         try:
             response = requests.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-            # DEBUG: Show API response in Streamlit if data is empty
-            time_keys = [k for k in data.keys() if 'Time Series' in k]
-            if not time_keys:
-                st.warning(f"API response: {data}")
-                return pd.DataFrame()
-            ts_data = data[time_keys[0]]
-            df = pd.DataFrame.from_dict(ts_data, orient='index')
+            # if "values" not in data:
+            #     st.warning(f"API response: {data}")
+            #     return pd.DataFrame()
+            df = pd.DataFrame(data["values"])
             df = df.rename(columns={
-                '1. open': 'Open',
-                '2. high': 'High',
-                '3. low': 'Low',
-                '4. close': 'Close',
-                '5. volume': 'Volume'
+                'datetime': 'Datetime',
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume'
             })
-            df.index = pd.to_datetime(df.index)
-            df = df.astype(float).sort_index()
-            return df
+            df['Datetime'] = pd.to_datetime(df['Datetime'])
+            df = df.sort_values('Datetime')
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            return df.dropna()
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
                 time.sleep(BASE_DELAY * (2 ** attempt) + uniform(0, 0.5))
@@ -53,20 +61,20 @@ def fetch_alpha_vantage_data(ticker, function, outputsize='compact'):
 
 @st.cache_data(ttl=300)
 def fetch_stock_data(ticker, period):
-    function_map = {
-        '1d': 'TIME_SERIES_DAILY',
-        '1wk': 'TIME_SERIES_WEEKLY',
-        '1mo': 'TIME_SERIES_MONTHLY',
-        '1y': 'TIME_SERIES_WEEKLY',
-        'max': 'TIME_SERIES_MONTHLY'
+    # Map period to interval and outputsize for Twelve Data
+    period_map = {
+        '1d': ('5min', 78),     # 6.5h * 12 = 78 intervals for 1 trading day
+        '1wk': ('30min', 65),   # 5 days * 13 intervals = 65
+        '1mo': ('1h', 160),     # 20 trading days * 8 intervals = 160
+        '1y': ('1day', 252),    # 252 trading days in a year
+        'max': ('1day', 5000)   # max available
     }
-    function = function_map.get(period, 'TIME_SERIES_DAILY')
-    return fetch_alpha_vantage_data(ticker, function)
+    interval, outputsize = period_map.get(period, ('1day', 100))
+    return fetch_twelvedata_data(ticker, interval, outputsize)
 
 def process_data(data):
     if not data.empty:
         df = data.copy()
-        df = df.reset_index().rename(columns={'index': 'Datetime'})
         return df.dropna()
     return pd.DataFrame()
 
@@ -94,14 +102,11 @@ def add_technical_indicators(df):
 
 # --- Streamlit UI ---
 if 'main_ticker' not in st.session_state:
-    st.session_state.main_ticker = 'ADBE'
-
-st.set_page_config(layout="wide", page_icon="📈")
-st.title('Real-Time Stock Dashboard')
+    st.session_state.main_ticker = 'AAPL'
 
 with st.sidebar:
     st.header('Controls')
-    st.session_state.main_ticker = st.text_input('Ticker', st.session_state.main_ticker).upper()
+    st.session_state.main_ticker = st.selectbox('Ticker', SYMBOLS, index=SYMBOLS.index(st.session_state.main_ticker))
     time_period = st.selectbox('Time Period', ['1d', '1wk', '1mo', '1y', 'max'])
     chart_type = st.selectbox('Chart Type', ['Candlestick', 'Line'])
     indicators = st.multiselect('Technical Indicators', ['SMA 20', 'EMA 20'])
